@@ -9,3 +9,7 @@ coverage/
 .vimrc
 venv
 .idea
+Lib
+Scripts
+pyvenv.cfg
+share

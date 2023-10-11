@@ -6,7 +6,7 @@ import os
 import flask
 from beets import ui, library, util
 from beets.plugins import BeetsPlugin
-from flask import g, request
+from flask import g, jsonify, request
 from mediafile import MediaFile
 from PIL import Image as PillowImage
 
@@ -68,17 +68,19 @@ def create_thumbnail(image_data, size):
 def before_request():
     g.lib = app.config['lib']
 
+def get_lib() -> library.Library:
+    return g.lib
 
 @app.route('/items', methods=["GET"])
 def item_query():
     query = request.args.get('query')
-    result = g.lib.items(query)
+    result = get_lib().items(query)
     return app.response_class(_json_list(result), mimetype='application/json')
 
 
 @app.route('/item/<int:item_id>/file')
 def item_file(item_id):
-    item = g.lib.get_item(item_id)
+    item = get_lib().get_item(item_id)
 
     if not item:
         return flask.abort(404)
@@ -99,7 +101,7 @@ def item_file(item_id):
 @app.route('/item/<int:item_id>/art')
 def item_art(item_id):
     size = request.args.get('size', type=int)
-    item = g.lib.get_item(item_id)
+    item = get_lib().get_item(item_id)
 
     if not item:
         return flask.abort(404)
@@ -118,6 +120,14 @@ def item_art(item_id):
     response = flask.send_file(io.BytesIO(image), as_attachment=True, attachment_filename="art.jpg", mimetype='image/jpeg')
     response.headers['Content-Length'] = len(image)
     return response
+
+@app.route('/import', methods=["PUT"])
+def import_path():
+    path = request.get_json()["path"]
+    from beets.ui.commands import import_cmd
+    subopts, subargs = import_cmd.parser.parse_args([path])
+    import_cmd.func(get_lib(), subopts, subargs)
+    return jsonify(ok=True)
 
 
 class RestApiPlugin(BeetsPlugin):
