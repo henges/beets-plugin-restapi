@@ -1,4 +1,5 @@
 import base64
+from collections import defaultdict
 import io
 import json
 import os
@@ -9,6 +10,9 @@ from beets.plugins import BeetsPlugin
 from flask import g, jsonify, request
 from mediafile import MediaFile
 from PIL import Image as PillowImage
+import sys
+from beets.ui.commands import import_cmd
+from beets.importer import ImportTask, ImportSession
 
 app = flask.Flask(__name__)
 
@@ -67,9 +71,13 @@ def create_thumbnail(image_data, size):
 @app.before_request
 def before_request():
     g.lib = app.config['lib']
+    g.plug = app.config['plugin']
 
 def get_lib() -> library.Library:
     return g.lib
+
+def get_plugin(): # type: () -> RestApiPlugin
+    return g.plug
 
 @app.route('/items', methods=["GET"])
 def item_query():
@@ -123,11 +131,20 @@ def item_art(item_id):
 
 @app.route('/import', methods=["PUT"])
 def import_path():
-    path = request.get_json()["path"]
-    from beets.ui.commands import import_cmd
-    subopts, subargs = import_cmd.parser.parse_args([path])
+    plugin = get_plugin()
+    plugin.reset() # reset the import results list 
+    body = request.get_json() # type: dict
+    path = body.get("path")
+    if not path:
+        return flask.abort(400, {'message': '"path" is required' })
+    args = [x for x in body.get("args", "").split(" ") if x] # Filter empty string
+
+    subopts, subargs = import_cmd.parser.parse_args(args + [path])
+    # We *must* run in quiet mode, otherwise import will block the terminal forever.
+    subopts.ensure_value('quiet', True)
     import_cmd.func(get_lib(), subopts, subargs)
-    return jsonify(ok=True)
+
+    return jsonify(ok=True, summary=plugin.action_counts, details=plugin.import_choices)
 
 
 class RestApiPlugin(BeetsPlugin):
@@ -135,10 +152,28 @@ class RestApiPlugin(BeetsPlugin):
     def __init__(self):
         super(RestApiPlugin, self).__init__()
 
+        self.reset()
+
         self.config.add({
             'host': u'127.0.0.1',
             'port': 8338
         })
+        self.register_listener('import_task_choice', func=self.record_import_choice)
+
+    def reset(self): 
+        self.import_choices = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+        self.action_counts = defaultdict(lambda: 0)
+
+    def record_import_choice(self, session: ImportSession, task: ImportTask):
+        items = task.items # type: list[library.Item]
+        for i in items:
+            self.import_choices[task.choice_flag.name][i.albumartist][i.album].append({
+                "artist": i.albumartist, 
+                "album": i.album, 
+                "title": i.title, 
+                "path": i.path.decode()
+            })
+            self.action_counts[task.choice_flag.name] += 1
 
     def commands(self):
         cmd = ui.Subcommand('restapi', help=u'start a REST api server')
@@ -154,9 +189,11 @@ class RestApiPlugin(BeetsPlugin):
             app.config['lib'] = lib
             app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
             app.config['log'] = self._log
+            app.config['plugin'] = self
 
             app.run(host=self.config['host'].as_str(),
-                    port=self.config['port'].get(int))
+                    port=self.config['port'].get(int),
+                    debug=False)
 
         cmd.func = func
         return [cmd]
